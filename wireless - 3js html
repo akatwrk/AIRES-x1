@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Aires X1 - WiFi Teleoperation</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #303538; font-family: monospace; color: #00ffcc; }
+        
+        #ui { 
+            position: absolute; top: 20px; left: 20px; 
+            background: rgba(40, 44, 52, 0.95); 
+            padding: 20px; 
+            border: 2px solid #00ffcc; 
+            border-radius: 8px; 
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5); 
+            width: 280px;
+        }
+
+        h3 { margin-top: 0; color: #00ffcc; text-align: center; border-bottom: 1px solid #00ffcc; padding-bottom: 10px; letter-spacing: 2px; }
+        
+        .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
+        .val { font-weight: bold; color: #ffffff; }
+        
+        /* Status Indicator Styles */
+        #connection-dot {
+            display: inline-block; width: 10px; height: 10px; 
+            background: red; border-radius: 50%; margin-right: 8px; 
+            box-shadow: 0 0 5px red; vertical-align: middle;
+        }
+        
+        button { 
+            width: 100%; background: #00ffcc; border: none; 
+            font-weight: bold; padding: 12px; margin-top: 10px;
+            cursor: pointer; color: #282c34; font-size: 16px; 
+            border-radius: 4px; transition: all 0.3s;
+        }
+        button:hover { background: #ffffff; box-shadow: 0 0 10px #ffffff; }
+
+        #legend { margin-top: 15px; font-size: 10px; color: #aaa; text-align: center; border-top: 1px solid #555; padding-top: 5px;}
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <h3>AIRES X1 WIFI</h3>
+        
+        <div class="row" style="background: rgba(0,0,0,0.3); padding: 5px; border-radius: 4px; margin-bottom: 15px;">
+            <span>LINK STATUS:</span>
+            <div>
+                <span id="connection-dot"></span>
+                <span id="status-text" class="val">OFFLINE</span>
+            </div>
+        </div>
+
+        <div class="row"><span>BASE (Yaw):</span> <span id="val-base" class="val">0.00</span></div>
+        <div class="row"><span>SHOULDER (Pitch):</span> <span id="val-sh" class="val">0.00</span></div>
+        <div class="row"><span>ELBOW (Rel Pitch):</span> <span id="val-el" class="val">0.00</span></div>
+        <div class="row"><span>WRIST (Rel Roll):</span> <span id="val-wr" class="val">0.00</span></div>
+        <div class="row"><span>GRIPPER (Roll):</span> <span id="val-gr" class="val">0.00</span></div>
+        
+        <button id="connectBtn">CONNECT WIFI</button>
+        <div id="legend">CYAN LINE = MOTION TRAJECTORY</div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+        // --- 1. SCENE SETUP ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x303538); 
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+        camera.position.set(6, 6, 6); 
+        camera.lookAt(0, 2, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.outputColorSpace = THREE.SRGBColorSpace; 
+        document.body.appendChild(renderer.domElement);
+
+        // Lights
+        scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+        const mainLight = new THREE.DirectionalLight(0xffffff, 2.0);
+        mainLight.position.set(10, 20, 10);
+        scene.add(mainLight);
+        const fillLight = new THREE.DirectionalLight(0xaaaaff, 0.8);
+        fillLight.position.set(-10, 5, -10);
+        scene.add(fillLight);
+
+        scene.add(new THREE.GridHelper(20, 20, 0x666666, 0x444444));
+
+        // --- 2. ROBOT MODEL ---
+        const matBody = new THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.5, metalness: 0.3 });
+        const matJoint = new THREE.MeshStandardMaterial({ color: 0x444444, roughness: 0.6 });
+
+        // Base
+        const baseMesh = new THREE.Mesh(new THREE.CylinderGeometry(1, 1.2, 0.5, 32), matJoint);
+        scene.add(baseMesh);
+
+        // AXIS 1: BASE (YAW)
+        const axis1 = new THREE.Group();
+        axis1.position.y = 0.25; 
+        scene.add(axis1);
+        const turret = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 0.5, 32), matBody);
+        turret.position.y = 0.25;
+        axis1.add(turret);
+
+        // AXIS 2: SHOULDER (PITCH)
+        const axis2 = new THREE.Group();
+        axis2.position.y = 0.5;
+        axis1.add(axis2);
+        const shoulderJoint = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 1.2, 32).rotateZ(Math.PI/2), matJoint);
+        axis2.add(shoulderJoint);
+        const upperArm = new THREE.Mesh(new THREE.BoxGeometry(0.3, 2.0, 0.3), matBody);
+        upperArm.position.y = 1.0; 
+        axis2.add(upperArm);
+
+        // AXIS 3: ELBOW (PITCH)
+        const axis3 = new THREE.Group();
+        axis3.position.y = 2.0;
+        axis2.add(axis3);
+        const elbowJoint = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 1.0, 32).rotateZ(Math.PI/2), matJoint);
+        axis3.add(elbowJoint);
+        const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.25, 2.0, 0.25), matBody);
+        forearm.position.y = 1.0;
+        axis3.add(forearm);
+
+        // AXIS 4: WRIST (ROLL)
+        const axis4 = new THREE.Group();
+        axis4.position.y = 2.0; 
+        axis3.add(axis4);
+        const wristMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.2, 0.4), matJoint);
+        wristMesh.position.y = 0.2;
+        axis4.add(wristMesh);
+
+        // AXIS 5: GRIPPER (ROLL/ACTUATE)
+        const axis5 = new THREE.Group();
+        axis5.position.y = 0.4;
+        axis4.add(axis5);
+        const gripBase = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.1, 0.2), matBody);
+        axis5.add(gripBase);
+        const fingerL = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.5, 0.1), matBody);
+        fingerL.position.set(-0.25, 0.3, 0);
+        axis5.add(fingerL);
+        const fingerR = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.5, 0.1), matBody);
+        fingerR.position.set(0.25, 0.3, 0);
+        axis5.add(fingerR);
+        
+        // Tool Tip (For Motion Trail)
+        const toolTip = new THREE.Mesh(new THREE.SphereGeometry(0.1), new THREE.MeshBasicMaterial({color: 0x00ffcc}));
+        toolTip.position.y = 0.6;
+        axis5.add(toolTip);
+
+        // --- 3. MOTION TRAIL ---
+        const MAX_POINTS = 300; 
+        const trailGeo = new THREE.BufferGeometry();
+        const positions = new Float32Array(MAX_POINTS * 3); 
+        trailGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const trailMat = new THREE.LineBasicMaterial({ color: 0x00ffcc, linewidth: 2 });
+        const trailLine = new THREE.Line(trailGeo, trailMat);
+        scene.add(trailLine); 
+
+        // --- 4. LOGIC & ANIMATION ---
+        let imu1 = { yaw: 0, pitch: 0, roll: 0 }; 
+        let imu2 = { yaw: 0, pitch: 0, roll: 0 }; 
+        const worldPos = new THREE.Vector3(); 
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // A. KINEMATICS
+            axis1.rotation.y = THREE.MathUtils.lerp(axis1.rotation.y, imu1.yaw, 0.15);
+            axis2.rotation.x = THREE.MathUtils.lerp(axis2.rotation.x, imu1.pitch, 0.15);
+            
+            let elbowTarget = imu2.pitch - imu1.pitch;
+            axis3.rotation.x = THREE.MathUtils.lerp(axis3.rotation.x, elbowTarget, 0.15);
+            
+            let wristTarget = imu2.roll - imu1.roll;
+            axis4.rotation.y = THREE.MathUtils.lerp(axis4.rotation.y, wristTarget, 0.15);
+            
+            axis5.rotation.y = THREE.MathUtils.lerp(axis5.rotation.y, imu2.roll, 0.15);
+
+            // B. MOTION TRAIL
+            toolTip.getWorldPosition(worldPos);
+            const posArr = trailGeo.attributes.position.array;
+            for (let i = 0; i < (MAX_POINTS - 1) * 3; i++) {
+                posArr[i] = posArr[i + 3];
+            }
+            const idx = (MAX_POINTS - 1) * 3;
+            posArr[idx] = worldPos.x;
+            posArr[idx+1] = worldPos.y;
+            posArr[idx+2] = worldPos.z;
+            trailGeo.attributes.position.needsUpdate = true;
+
+            // C. UPDATE UI CALCULATED VALUES
+            // (Base, Shoulder, Gripper are updated by the WiFi event, but we update derived ones here)
+            document.getElementById('val-el').innerText = elbowTarget.toFixed(2);
+            document.getElementById('val-wr').innerText = wristTarget.toFixed(2);
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // --- 5. WIFI CONNECTION ---
+        document.getElementById('connectBtn').innerText = "CONNECT WIFI";
+        
+        document.getElementById('connectBtn').addEventListener('click', () => {
+            // 1. Create WebSocket
+            // 192.168.4.1 is the default IP of the ESP32 in Hotspot Mode
+            const socket = new WebSocket('ws://192.168.4.1:81');
+
+            document.getElementById('status-text').innerText = "CONNECTING...";
+
+            // 2. Handle Connection Open
+            socket.onopen = function(e) {
+                document.getElementById('status-text').innerText = "ONLINE (WIFI)";
+                document.getElementById('status-text').style.color = "#00ffcc";
+                document.getElementById('connection-dot').style.background = "#00ffcc";
+                document.getElementById('connection-dot').style.boxShadow = "0 0 10px #00ffcc";
+                document.getElementById('connectBtn').style.display = "none";
+                console.log("WebSocket Established");
+            };
+
+            // 3. Handle Incoming Data
+            socket.onmessage = function(event) {
+                // The ESP32 sends two JSONs combined or separate. 
+                // We split by newline just in case they arrive clumped.
+                const messages = event.data.split('\n');
+                
+                messages.forEach(msg => {
+                    try {
+                        if (msg.trim().startsWith('{')) {
+                            const data = JSON.parse(msg);
+                            
+                            if (data.id === 1) { // Shoulder
+                                imu1.pitch = data.rX;
+                                imu1.roll = data.rY;
+                                imu1.yaw = data.rY; // Logic Mapping
+                                
+                                // Update UI Numbers
+                                document.getElementById('val-base').innerText = imu1.yaw.toFixed(2);
+                                document.getElementById('val-sh').innerText = imu1.pitch.toFixed(2);
+                            } 
+                            else if (data.id === 0) { // Forearm
+                                imu2.pitch = data.rX;
+                                imu2.roll = data.rY;
+                                
+                                // Update UI Numbers
+                                document.getElementById('val-gr').innerText = imu2.roll.toFixed(2);
+                            }
+                        }
+                    } catch (e) { 
+                        // Ignore partial packets
+                    }
+                });
+            };
+
+            // 4. Handle Errors
+            socket.onclose = function(event) {
+                if (event.wasClean) {
+                    document.getElementById('status-text').innerText = "DISCONNECTED";
+                } else {
+                    document.getElementById('status-text').innerText = "WIFI ERROR";
+                    document.getElementById('status-text').style.color = "red";
+                    document.getElementById('connection-dot').style.background = "red";
+                }
+            };
+            
+            socket.onerror = function(error) {
+                console.log(`[error] ${error.message}`);
+            };
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
