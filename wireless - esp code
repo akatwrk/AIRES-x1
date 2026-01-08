@@ -1,0 +1,101 @@
+#include <Wire.h>
+#include "MPU6050.h"
+#include <MadgwickAHRS.h>
+#include <WiFi.h>
+#include <ArduinoWebsockets.h> 
+
+using namespace websockets;
+
+// ================= WIFI CONFIG =================
+const char* ssid = "Aires_X1"; 
+const char* password = "password123"; 
+WebsocketsServer server;
+WebsocketsClient client; // Track the single connected laptop
+
+// ================= HARDWARE =================
+MPU6050 imuWrist(0x68);
+MPU6050 imuBicep(0x69);
+Madgwick filterWrist;
+Madgwick filterBicep;
+
+// ================= VARS =================
+float gW_x, gW_y, gW_z, gB_x, gB_y, gB_z;
+unsigned long lastSend = 0;
+
+void setup() {
+  Serial.begin(921600);
+  Wire.begin(21, 22);
+  Wire.setClock(400000);
+  delay(500);
+
+  // 1. SETUP SENSORS
+  imuWrist.initialize();
+  imuBicep.initialize();
+  filterWrist.begin(100);
+  filterBicep.begin(100);
+
+  // 2. CALIBRATION
+  Serial.println("Calibrating...");
+  long wx=0, wy=0, wz=0, bx=0, by=0, bz=0;
+  for (int i=0; i<200; i++) {
+    int16_t ax, ay, az, gx, gy, gz;
+    imuWrist.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    wx+=gx; wy+=gy; wz+=gz;
+    imuBicep.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    bx+=gx; by+=gy; bz+=gz;
+    delay(2);
+  }
+  gW_x=wx/200.0; gW_y=wy/200.0; gW_z=wz/200.0;
+  gB_x=bx/200.0; gB_y=by/200.0; gB_z=bz/200.0;
+
+  // 3. SETUP WIFI HOTSPOT
+  WiFi.softAP(ssid, password);
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("WiFi Started! IP: ");
+  Serial.println(IP);
+
+  // 4. START SERVER
+  server.listen(81); 
+  Serial.println("Waiting for Laptop to connect...");
+}
+
+void loop() {
+  // --- CONNECTION HANDLING ---
+  // If no client is connected, wait for one.
+  if (!client.available()) {
+    client = server.accept(); // This blocks until connection
+    Serial.println("Client Connected!");
+  }
+  
+  // Keep connection alive
+  if (client.available()) {
+    client.poll();
+  }
+
+  // --- SENSOR FUSION ---
+  int16_t ax, ay, az, gx, gy, gz;
+
+  imuWrist.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+  filterWrist.updateIMU((gx-gW_x)*DEG_TO_RAD, (gy-gW_y)*DEG_TO_RAD, (gz-gW_z)*DEG_TO_RAD, ax, ay, az);
+
+  imuBicep.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+  filterBicep.updateIMU((gx-gB_x)*DEG_TO_RAD, (gy-gB_y)*DEG_TO_RAD, (gz-gB_z)*DEG_TO_RAD, ax, ay, az);
+
+  // --- SEND DATA (30Hz) ---
+  if (millis() - lastSend > 30 && client.available()) {
+    String json = "{\"id\":1, \"rX\":";
+    json += String(filterBicep.getPitch()*DEG_TO_RAD, 3);
+    json += ", \"rY\":";
+    json += String(filterBicep.getRoll()*DEG_TO_RAD, 3);
+    json += "} \n"; 
+    
+    json += "{\"id\":0, \"rX\":";
+    json += String(filterWrist.getPitch()*DEG_TO_RAD, 3);
+    json += ", \"rY\":";
+    json += String(filterWrist.getRoll()*DEG_TO_RAD, 3);
+    json += "}";
+
+    client.send(json); // Send to the single connected client
+    lastSend = millis();
+  }
+}
