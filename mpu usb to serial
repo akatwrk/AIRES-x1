@@ -1,0 +1,62 @@
+#include <Wire.h>
+#include "MPU6050.h"
+#include <MadgwickAHRS.h>
+
+MPU6050 imuWrist(0x68);
+MPU6050 imuBicep(0x69);
+Madgwick filterWrist;
+Madgwick filterBicep;
+
+float gW_x, gW_y, gW_z, gB_x, gB_y, gB_z;
+unsigned long lastPrint = 0;
+
+void setup() {
+  // 1. MAXIMUM SPEED
+  Serial.begin(921600); 
+  Wire.begin(21, 22);
+  Wire.setClock(400000); 
+  delay(500);
+
+  imuWrist.initialize();
+  imuBicep.initialize();
+  filterWrist.begin(100); // 100Hz
+  filterBicep.begin(100);
+
+  // Quick Calibration (Blocking)
+  long wx=0, wy=0, wz=0, bx=0, by=0, bz=0;
+  for (int i=0; i<200; i++) {
+    int16_t ax, ay, az, gx, gy, gz;
+    imuWrist.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    wx+=gx; wy+=gy; wz+=gz;
+    imuBicep.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    bx+=gx; by+=gy; bz+=gz;
+    delay(2);
+  }
+  gW_x=wx/200.0; gW_y=wy/200.0; gW_z=wz/200.0;
+  gB_x=bx/200.0; gB_y=by/200.0; gB_z=bz/200.0;
+}
+
+void loop() {
+  int16_t ax, ay, az, gx, gy, gz;
+
+  // READ & UPDATE FILTER
+  imuWrist.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+  filterWrist.updateIMU((gx-gW_x)*DEG_TO_RAD, (gy-gW_y)*DEG_TO_RAD, (gz-gW_z)*DEG_TO_RAD, ax, ay, az);
+
+  imuBicep.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+  filterBicep.updateIMU((gx-gB_x)*DEG_TO_RAD, (gy-gB_y)*DEG_TO_RAD, (gz-gB_z)*DEG_TO_RAD, ax, ay, az);
+
+  // SEND DATA (Target 50Hz = every 20ms)
+  if (millis() - lastPrint > 20) {
+    // Shorter format, fewer decimals (2 instead of 4)
+    Serial.print("{\"id\":0,\"rX\":"); Serial.print(filterWrist.getPitch()*DEG_TO_RAD, 2);
+    Serial.print(",\"rY\":"); Serial.print(filterWrist.getRoll()*DEG_TO_RAD, 2);
+    Serial.println("}");
+
+    Serial.print("{\"id\":1,\"rX\":"); Serial.print(filterBicep.getPitch()*DEG_TO_RAD, 2);
+    Serial.print(",\"rY\":"); Serial.print(filterBicep.getRoll()*DEG_TO_RAD, 2);
+    Serial.println("}");
+    
+    lastPrint = millis();
+  }
+}
