@@ -1,0 +1,138 @@
+#include <Wire.h>
+#include "MPU6050.h"
+#include <MadgwickAHRS.h>
+#include <SPI.h>
+#include <RF24.h>
+
+// ================= HARDWARE SETUP =================
+MPU6050 imuWrist(0x68); // Forearm
+MPU6050 imuBicep(0x69); // Upper Arm
+
+// NRF Radio (CE, CSN)
+RF24 radio(4, 5); 
+const byte address[6] = "A1X01"; // Secure pipe address
+
+// ================= DATA PACKET =================
+// This matches the 5-Axis structure of your robot
+struct RobotData {
+  uint8_t base;     // Axis 1: Yaw
+  uint8_t shoulder; // Axis 2: Pitch
+  uint8_t elbow;    // Axis 3: Relative Pitch
+  uint8_t wrist;    // Axis 4: Relative Roll
+  uint8_t gripper;  // Axis 5: Roll
+};
+
+RobotData data;
+
+// ================= FILTERS & CALIBRATION =================
+Madgwick filterWrist;
+Madgwick filterBicep;
+float gW_x, gW_y, gW_z, gB_x, gB_y, gB_z;
+
+// ================= UTILS =================
+// Helper to map angles to servo range (safe constraints)
+uint8_t mapAngle(float angle, float minAng, float maxAng, int minServo, int maxServo) {
+  float val = constrain(angle, minAng, maxAng);
+  return (uint8_t)map(val * 100, minAng * 100, maxAng * 100, minServo, maxServo);
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(21, 22);
+  Wire.setClock(400000);
+  delay(500);
+
+  // 1. Init IMUs
+  imuWrist.initialize();
+  imuBicep.initialize();
+  
+  // 2. Init Filters (100Hz)
+  filterWrist.begin(100);
+  filterBicep.begin(100);
+
+  // 3. Init Radio
+  if (!radio.begin()) {
+    Serial.println(F("Radio hardware not responding!"));
+    while (1) {} // Stop if radio fails
+  }
+  radio.setPALevel(RF24_PA_LOW); // Low power for short range (stable)
+  radio.openWritingPipe(address);
+  radio.stopListening(); // Transmitter mode
+
+  // 4. Quick Calibration
+  Serial.println("Calibrating... Stay still.");
+  long wx=0, wy=0, wz=0, bx=0, by=0, bz=0;
+  for (int i=0; i<200; i++) {
+    int16_t ax, ay, az, gx, gy, gz;
+    imuWrist.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    wx+=gx; wy+=gy; wz+=gz;
+    imuBicep.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    bx+=gx; by+=gy; bz+=gz;
+    delay(2);
+  }
+  gW_x=wx/200.0; gW_y=wy/200.0; gW_z=wz/200.0;
+  gB_x=bx/200.0; gB_y=by/200.0; gB_z=bz/200.0;
+  Serial.println("Ready.");
+}
+
+void loop() {
+  int16_t ax, ay, az, gx, gy, gz;
+
+  // --- 1. READ & FUSE DATA ---
+  // Forearm
+  imuWrist.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+  filterWrist.updateIMU((gx-gW_x)*DEG_TO_RAD, (gy-gW_y)*DEG_TO_RAD, (gz-gW_z)*DEG_TO_RAD, ax, ay, az);
+
+  // Bicep
+  imuBicep.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+  filterBicep.updateIMU((gx-gB_x)*DEG_TO_RAD, (gy-gB_y)*DEG_TO_RAD, (gz-gB_z)*DEG_TO_RAD, ax, ay, az);
+
+  // --- 2. EXTRACT ANGLES (DEGREES) ---
+  float sh_pitch = filterBicep.getPitch();
+  float sh_roll  = filterBicep.getRoll();
+  // Madgwick usually gives Yaw relative to start, but for 5-axis we often map Roll -> Base Yaw
+  float base_yaw = sh_roll; 
+
+  float wr_pitch = filterWrist.getPitch();
+  float wr_roll  = filterWrist.getRoll();
+
+  // --- 3. APPLY 5-AXIS LOGIC (Same as Web Twin) ---
+  
+  // AXIS 1: BASE (Mapped from Shoulder Roll/Lean)
+  // Leaning left/right rotates the base
+  data.base = mapAngle(base_yaw, -45, 45, 0, 180);
+
+  // AXIS 2: SHOULDER (Mapped from Shoulder Pitch)
+  // Lifting arm up/down
+  data.shoulder = mapAngle(sh_pitch, -60, 60, 0, 180);
+
+  // AXIS 3: ELBOW (Relative Pitch)
+  // Bending elbow = Wrist Pitch - Shoulder Pitch
+  float elbow_rel = wr_pitch - sh_pitch;
+  data.elbow = mapAngle(elbow_rel, -10, 100, 180, 0); // Inverted if needed
+
+  // AXIS 4: WRIST (Relative Roll)
+  // Rotating wrist relative to arm
+  float wrist_rel = wr_roll - sh_roll;
+  data.wrist = mapAngle(wrist_rel, -60, 60, 0, 180);
+
+  // AXIS 5: GRIPPER (Forearm Roll)
+  // Twist arm to rotate gripper
+  data.gripper = mapAngle(wr_roll, -90, 90, 0, 180);
+
+  // --- 4. TRANSMIT ---
+  bool ok = radio.write(&data, sizeof(data));
+
+  // --- 5. DEBUG PRINT ---
+  // Only print occasionally to save speed
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 100) {
+    Serial.print("TX: "); Serial.print(ok ? "OK " : "FAIL ");
+    Serial.print(" B:"); Serial.print(data.base);
+    Serial.print(" S:"); Serial.print(data.shoulder);
+    Serial.print(" E:"); Serial.print(data.elbow);
+    Serial.print(" W:"); Serial.print(data.wrist);
+    Serial.print(" G:"); Serial.println(data.gripper);
+    lastPrint = millis();
+  }
+}
