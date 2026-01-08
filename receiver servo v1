@@ -1,0 +1,100 @@
+#include <SPI.h>
+#include <RF24.h>
+#include <ESP32Servo.h>
+
+// ================= RADIO SETUP =================
+RF24 radio(4, 5); // CE, CSN
+const byte address[6] = "A1X01"; // Must match Transmitter exactly!
+
+// ================= SERVO SETUP =================
+Servo baseServo;
+Servo shoulderServo;
+Servo elbowServo;
+Servo wristServo;
+Servo gripperServo;
+
+// Pin Definitions
+#define PIN_BASE     13
+#define PIN_SHOULDER 12
+#define PIN_ELBOW    14
+#define PIN_WRIST    27
+#define PIN_GRIPPER  26
+
+// ================= DATA PACKET =================
+// Must match Transmitter structure 100%
+struct RobotData {
+  uint8_t base;
+  uint8_t shoulder;
+  uint8_t elbow;
+  uint8_t wrist;
+  uint8_t gripper;
+};
+
+RobotData data;
+
+// Variables for smooth movement
+RobotData currentPos;
+
+void setup() {
+  Serial.begin(115200);
+  
+  // 1. Attach Servos
+  // We use min/max pulse widths for stability (500-2400 is standard for MG996R)
+  baseServo.attach(PIN_BASE, 500, 2400);
+  shoulderServo.attach(PIN_SHOULDER, 500, 2400);
+  elbowServo.attach(PIN_ELBOW, 500, 2400);
+  wristServo.attach(PIN_WRIST, 500, 2400);
+  gripperServo.attach(PIN_GRIPPER, 500, 2400);
+
+  // 2. Set Start Position (Home)
+  baseServo.write(90);
+  shoulderServo.write(90);
+  elbowServo.write(90);
+  wristServo.write(90);
+  gripperServo.write(90);
+  
+  // Initialize currentPos
+  currentPos.base = 90;
+  currentPos.shoulder = 90;
+  currentPos.elbow = 90;
+  currentPos.wrist = 90;
+  currentPos.gripper = 90;
+
+  // 3. Start Radio
+  if (!radio.begin()) {
+    Serial.println("Radio Hardware Error!");
+    while (1);
+  }
+  radio.setPALevel(RF24_PA_LOW);
+  radio.openReadingPipe(0, address);
+  radio.startListening(); // Receiver Mode
+  
+  Serial.println("Receiver Ready. Waiting for data...");
+}
+
+void loop() {
+  // Check if data is arriving
+  if (radio.available()) {
+    
+    // Read the whole packet
+    radio.read(&data, sizeof(RobotData));
+
+    // --- SAFETY & SMOOTHING ---
+    // Direct mapping can be jerky. We can just write directly for responsiveness,
+    // or add smoothing later. For now, let's write directly to prove connection.
+    
+    baseServo.write(data.base);
+    shoulderServo.write(data.shoulder);
+    elbowServo.write(data.elbow);
+    wristServo.write(data.wrist);
+    gripperServo.write(data.gripper);
+
+    // Debug Print (Optional - slows down loop slightly)
+    /*
+    Serial.print("RX: ");
+    Serial.print(data.base); Serial.print(" ");
+    Serial.print(data.shoulder); Serial.print(" ");
+    Serial.print(data.elbow); Serial.println("...");
+    */
+  }
+}
